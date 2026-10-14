@@ -1,305 +1,387 @@
+import gzip
+import json
 import os
 import re
-import json
-import gzip
 import sqlite3
 import smtplib
-from datetime import datetime, timezone, timedelta
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+import hashlib
+from datetime import datetime, date
+from email.message import EmailMessage
+from io import BytesIO
 
 import pandas as pd
 import requests
 import streamlit as st
 
-APP_NAME = "INTEX Alertas Públicas"
-DEFAULT_EMAIL = "intexventas@gmail.com"
-DEFAULT_DATA_URL = os.getenv(
-    "DATA_URL",
-    "https://fastly.data.open-contracting.org/downloads/honduras_oncae/4176/2026.jsonl.gz"
+APP_TITLE = "INTEX Alertas Públicas V2"
+DEFAULT_DATA_URL = "https://fastly.data.open-contracting.org/downloads/honduras_oncae/4176/2026.jsonl.gz"
+DB_PATH = os.getenv("INTEX_DB_PATH", "intex_alerts.sqlite3")
+
+DIRECT = {
+    "uniforme": 30, "uniformes": 30, "confeccion": 26, "confección": 26,
+    "textil": 25, "textiles": 25, "vestuario": 24, "ropa de trabajo": 25,
+    "ropa institucional": 25, "camisa": 22, "camisas": 22, "pantalon": 20,
+    "pantalón": 20, "pantalones": 20, "camiseta": 18, "camisetas": 18,
+    "polo": 18, "polos": 18, "chaqueta": 18, "chaquetas": 18,
+    "gabacha": 22, "gabachas": 22, "bata": 18, "batas": 18,
+    "overol": 22, "overoles": 22, "chaleco": 18, "chalecos": 18,
+    "delantal": 18, "delantales": 18, "mandil": 18, "gorra": 16,
+    "gorras": 16, "ropa industrial": 22, "uniforme escolar": 30,
+    "uniformes escolares": 30, "uniforme empresarial": 30,
+    "uniformes empresariales": 30
+}
+RELATED = {
+    "bordado": 12, "bordados": 12, "serigrafia": 12, "serigrafía": 12,
+    "dryfit": 14, "dry fit": 14, "reflectivo": 12, "reflectiva": 12,
+    "tela": 10, "telas": 10, "bandera": 8, "banderas": 8,
+    "pañuelo": 8, "bufanda": 8, "calzado": 3
+}
+EXCLUDE = {
+    "medicamento": 40, "medicamentos": 40, "farmaceutico": 40,
+    "farmacéutico": 40, "software": 35, "licencia de software": 40,
+    "combustible": 35, "gasolina": 35, "diesel": 35, "diésel": 35,
+    "vehiculo": 35, "vehículo": 35, "obra civil": 40, "construccion": 40,
+    "construcción": 40, "cemento": 35, "asfalto": 35,
+    "equipo medico": 40, "equipo médico": 40, "reactivos": 40
+}
+STRONG_TITLE = (
+    "uniforme", "uniformes", "confeccion", "confección", "textil", "textiles",
+    "camisa", "camisas", "ropa de trabajo", "vestuario", "gabacha", "overol",
+    "pantalon", "pantalón", "polo", "camiseta"
 )
-DB_PATH = os.getenv("DB_PATH", "intex_alertas.db")
-
-KEYWORDS = {
-    "uniforme": 12, "uniformes": 12, "textil": 12, "textiles": 12,
-    "confeccion": 11, "confección": 11, "vestuario": 10, "ropa": 9,
-    "camisa": 9, "camisas": 9, "pantalon": 9, "pantalón": 9,
-    "pantalones": 9, "polo": 8, "camiseta": 8, "chaqueta": 8,
-    "gabacha": 9, "bata": 8, "overol": 9, "overoles": 9,
-    "chaleco": 8, "delantal": 8, "mandil": 8, "gorro": 6, "gorra": 8,
-    "gorras": 8, "bordado": 7, "bordados": 7, "serigrafia": 7,
-    "serigrafía": 7, "dryfit": 8, "dry fit": 8, "reflectivo": 7,
-    "reflectiva": 7, "tela": 6, "bandera": 5, "banderas": 5,
-    "pañuelo": 5, "bufanda": 5
-}
-
-NEGATIVE = {
-    "medicamento": -8, "medicamentos": -8, "software": -6, "licencia de software": -8,
-    "obra civil": -8, "combustible": -8, "vehiculo": -7, "vehículo": -7
-}
 
 def normalize(s):
     s = str(s or "").lower()
-    s = re.sub(r"\s+", " ", s)
-    return s.strip()
+    replacements = {"á":"a","é":"e","í":"i","ó":"o","ú":"u","ü":"u"}
+    for a, b in replacements.items():
+        s = s.replace(a, b)
+    return re.sub(r"\s+", " ", s).strip()
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS sent_alerts (
-            ocid TEXT PRIMARY KEY,
-            sent_at TEXT NOT NULL
-        )
-    """)
-    conn.commit()
-    return conn
+def first(d, keys, default=""):
+    for k in keys:
+        value = d.get(k)
+        if value not in (None, "", [], {}):
+            return value
+    return default
 
-def get_sent(conn):
-    return {r[0] for r in conn.execute("SELECT ocid FROM sent_alerts").fetchall()}
-
-def mark_sent(conn, ocids):
-    now = datetime.now(timezone.utc).isoformat()
-    conn.executemany(
-        "INSERT OR IGNORE INTO sent_alerts(ocid, sent_at) VALUES (?, ?)",
-        [(x, now) for x in ocids]
-    )
-    conn.commit()
-
-def money(v):
+def parse_date(value):
+    if not value:
+        return None
     try:
-        return f"L {float(v):,.2f}"
+        return pd.to_datetime(value, errors="coerce", utc=True).date()
     except Exception:
-        return "No indicado"
+        return None
 
-def extract_text(rec):
-    parts = [
-        rec.get("ocid"), rec.get("id"), rec.get("date"),
-        rec.get("tender", {}).get("title"),
-        rec.get("tender", {}).get("description"),
-        rec.get("tender", {}).get("procurementMethod"),
-        rec.get("tender", {}).get("procurementMethodDetails"),
-        rec.get("planning", {}).get("rationale"),
-    ]
-    buyer = rec.get("buyer", {})
-    parts += [buyer.get("name"), buyer.get("id")]
+def extract_records(obj):
+    if isinstance(obj, list):
+        return obj
+    if isinstance(obj, dict):
+        if isinstance(obj.get("releases"), list):
+            return obj["releases"]
+        if isinstance(obj.get("records"), list):
+            return obj["records"]
+        if isinstance(obj.get("data"), list):
+            return obj["data"]
+        return [obj]
+    return []
 
-    for item in rec.get("tender", {}).get("items", []) or []:
-        parts += [
-            item.get("description"),
-            item.get("classification", {}).get("description"),
-            item.get("classification", {}).get("id"),
-        ]
-    for p in rec.get("parties", []) or []:
-        parts += [p.get("name"), p.get("roles")]
-    return normalize(" ".join(map(str, parts)))
-
-def score_record(rec):
-    text = extract_text(rec)
-    score = 0
-    hits = []
-    for kw, weight in KEYWORDS.items():
-        if normalize(kw) in text:
-            score += weight
-            hits.append(kw)
-    for kw, weight in NEGATIVE.items():
-        if normalize(kw) in text:
-            score += weight
-
-    if score >= 24:
-        level = "ALTA"
-    elif score >= 12:
-        level = "MEDIA"
+def load_records(url, uploaded_file=None):
+    raw = None
+    if uploaded_file is not None:
+        raw = uploaded_file.getvalue()
     else:
-        level = "BAJA"
-    return max(score, 0), level, hits
+        response = requests.get(url, timeout=45, headers={"User-Agent": "INTEX-Alertas-Publicas/2.0"})
+        response.raise_for_status()
+        raw = response.content
 
-def get_deadline(rec):
-    tp = rec.get("tender", {}).get("tenderPeriod", {}) or {}
-    return tp.get("endDate") or rec.get("tender", {}).get("submissionMethodDetails")
+    if raw[:2] == b"\x1f\x8b" or (url.lower().endswith(".gz") if uploaded_file is None else False):
+        try:
+            raw = gzip.decompress(raw)
+        except OSError:
+            pass
 
-def get_amount(rec):
-    tender_value = rec.get("tender", {}).get("value", {}) or {}
-    if tender_value.get("amount") is not None:
-        return tender_value.get("amount")
-    budget = rec.get("planning", {}).get("budget", {}) or {}
-    amount = budget.get("amount", {}) or {}
-    return amount.get("amount")
+    text = raw.decode("utf-8-sig", errors="replace").strip()
+    if not text:
+        return []
+    # JSON Lines is the common format for Open Contracting bulk files.
+    if "\n" in text and not text.lstrip().startswith(("[", "{")):
+        rows = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.extend(extract_records(json.loads(line)))
+            except json.JSONDecodeError:
+                continue
+        return rows
+    try:
+        return extract_records(json.loads(text))
+    except json.JSONDecodeError:
+        rows = []
+        for line in text.splitlines():
+            try:
+                rows.extend(extract_records(json.loads(line)))
+            except json.JSONDecodeError:
+                continue
+        return rows
 
-def record_to_row(rec):
-    score, level, hits = score_record(rec)
-    title = rec.get("tender", {}).get("title") or rec.get("tender", {}).get("description") or "Sin título"
-    buyer = (rec.get("buyer") or {}).get("name") or "No indicado"
-    method = rec.get("tender", {}).get("procurementMethodDetails") or rec.get("tender", {}).get("procurementMethod") or "No indicado"
-    ocid = rec.get("ocid") or rec.get("id") or ""
-    date = rec.get("date") or ""
-    deadline = get_deadline(rec)
-    amount = get_amount(rec)
+def flatten_record(r):
+    if not isinstance(r, dict):
+        return None
+    tender = r.get("tender") or {}
+    buyer = r.get("buyer") or {}
+    procuring = r.get("procuringEntity") or {}
+    parties = r.get("parties") or []
+    entity = first(buyer, ["name"]) or first(procuring, ["name"])
+    if not entity and isinstance(parties, list):
+        for p in parties:
+            if isinstance(p, dict) and p.get("roles") and any(x in p.get("roles", []) for x in ["buyer", "procuringEntity"]):
+                entity = (p.get("name") or "")
+                if entity:
+                    break
+    title = first(tender, ["title", "description"]) or first(r, ["title", "ocid", "id"], "Oportunidad sin título")
+    description = first(tender, ["description"])
+    items = tender.get("items") or []
+    item_text = " ".join(str(first(i, ["description", "classification"], "")) for i in items if isinstance(i, dict))
+    docs = tender.get("documents") or []
+    doc_text = " ".join(str(d.get("title", "")) for d in docs if isinstance(d, dict))
+    body = " ".join([str(description), item_text, doc_text])
+    tender_period = tender.get("tenderPeriod") or {}
+    closing = parse_date(first(tender_period, ["endDate"]))
+    published = parse_date(first(r, ["date"]) or first(tender, ["datePublished"]))
+    url = ""
+    for d in docs:
+        if isinstance(d, dict) and d.get("url"):
+            url = d["url"]
+            break
+    if not url:
+        url = first(tender, ["url"])
     return {
-        "ocid": ocid,
-        "fecha_publicacion": date[:10] if date else "",
-        "entidad": buyer,
-        "titulo": title,
-        "modalidad": method,
-        "fecha_limite": deadline[:10] if isinstance(deadline, str) else "",
-        "monto": amount,
-        "relevancia": level,
-        "puntaje": score,
-        "coincidencias": ", ".join(hits[:10]),
-        "url": f"https://contratacionesabiertas.gob.hn/proceso/{ocid}/" if ocid else "https://contratacionesabiertas.gob.hn/"
+        "id": str(first(r, ["ocid", "id"], "")),
+        "titulo": str(title),
+        "institucion": str(entity or "Institución no identificada"),
+        "descripcion": str(body),
+        "publicacion": published,
+        "fecha_limite": closing,
+        "url": str(url or ""),
+        "raw": r
     }
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_records(data_url):
-    r = requests.get(data_url, timeout=90, headers={"User-Agent": "INTEX-Alertas-Publicas/1.0"})
-    r.raise_for_status()
+def score_opportunity(title, body):
+    nt, nb = normalize(title), normalize(body)
+    score, found_direct, found_related, found_exclude = 0, [], [], []
+    for term, weight in DIRECT.items():
+        t = normalize(term)
+        if t in nt:
+            score += weight
+            found_direct.append(term)
+        elif t in nb:
+            score += max(5, round(weight * 0.48))
+            found_direct.append(term)
+    for term, weight in RELATED.items():
+        t = normalize(term)
+        if t in nt:
+            score += weight
+            found_related.append(term)
+        elif t in nb:
+            score += max(2, round(weight * 0.45))
+            found_related.append(term)
+    for term, weight in EXCLUDE.items():
+        if normalize(term) in nt or normalize(term) in nb:
+            score -= weight
+            found_exclude.append(term)
+
+    strong = any(normalize(term) in nt for term in STRONG_TITLE)
+    if found_related and not found_direct:
+        score = min(score, 35)
+    if found_exclude and not strong and not found_direct:
+        return 0, "DESCARTAR", "Coincide con términos de otro sector: " + ", ".join(found_exclude[:3])
+    score = max(0, min(100, score))
+    if strong or score >= 60:
+        priority = "MUY ALTA"
+    elif score >= 35:
+        priority = "ALTA"
+    elif score >= 18:
+        priority = "MEDIA"
+    else:
+        priority = "BAJA"
+
+    reasons = []
+    if found_direct:
+        reasons.append("Coincide con: " + ", ".join(dict.fromkeys(found_direct[:5])))
+    if found_related:
+        reasons.append("Relacionado con: " + ", ".join(dict.fromkeys(found_related[:3])))
+    if found_exclude:
+        reasons.append("Revisar posible rubro ajeno: " + ", ".join(found_exclude[:2]))
+    return score, priority, " | ".join(reasons) if reasons else "Coincidencia débil; revisar manualmente"
+
+def prepare_dataframe(records):
     rows = []
-    raw = gzip.decompress(r.content).decode("utf-8") if data_url.endswith(".gz") else r.text
-    for line in raw.splitlines():
-        if not line.strip():
+    seen = set()
+    for r in records:
+        flat = flatten_record(r)
+        if not flat:
             continue
-        try:
-            rec = json.loads(line)
-            row = record_to_row(rec)
-            if row["puntaje"] > 0:
-                rows.append(row)
-        except Exception:
+        key = flat["id"] or hashlib.sha1((flat["titulo"] + flat["institucion"]).encode()).hexdigest()
+        if key in seen:
             continue
+        seen.add(key)
+        score, priority, reason = score_opportunity(flat["titulo"], flat["descripcion"])
+        if score < 12 or priority == "DESCARTAR":
+            continue
+        today = date.today()
+        deadline = flat["fecha_limite"]
+        days = (deadline - today).days if deadline else None
+        if deadline:
+            status = "VENCIDA" if days < 0 else ("URGENTE" if days <= 7 else ("PRÓXIMA" if days <= 15 else "VIGENTE"))
+        else:
+            status = "Sin fecha publicada"
+        rows.append({
+            "Prioridad": priority, "Puntaje": score, "Título": flat["titulo"],
+            "Institución": flat["institucion"], "Fecha límite": deadline,
+            "Días restantes": days, "Estado": status, "¿Por qué INTEX?": reason,
+            "Publicado": flat["publicacion"], "Enlace": flat["url"], "_id": key,
+            "_texto": normalize(flat["titulo"] + " " + flat["institucion"] + " " + flat["descripcion"])
+        })
     df = pd.DataFrame(rows)
+    if not df.empty:
+        order = {"MUY ALTA": 0, "ALTA": 1, "MEDIA": 2, "BAJA": 3}
+        df["_orden"] = df["Prioridad"].map(order)
+        df = df.sort_values(["_orden", "Puntaje", "Días restantes"], ascending=[True, False, True], na_position="last").drop(columns=["_orden"])
+    return df
+
+def init_db():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS sent_alerts (id TEXT PRIMARY KEY, sent_at TEXT)")
+        conn.commit()
+
+def send_email(df, recipient, smtp_user, smtp_password):
     if df.empty:
-        return df
-    df["fecha_publicacion"] = pd.to_datetime(df["fecha_publicacion"], errors="coerce")
-    df["fecha_limite_dt"] = pd.to_datetime(df["fecha_limite"], errors="coerce")
-    return df.sort_values(["puntaje", "fecha_publicacion"], ascending=[False, False]).reset_index(drop=True)
+        return 0, "No hay oportunidades para enviar."
+    if not smtp_user or not smtp_password:
+        return 0, "Falta configurar SMTP_USER y SMTP_PASSWORD en los secretos."
+    init_db()
+    new_rows = []
+    with sqlite3.connect(DB_PATH) as conn:
+        sent = {row[0] for row in conn.execute("SELECT id FROM sent_alerts").fetchall()}
+        for _, row in df.iterrows():
+            if str(row["_id"]) not in sent:
+                new_rows.append(row)
+        if not new_rows:
+            return 0, "No se encontraron oportunidades nuevas para enviar."
+        msg = EmailMessage()
+        msg["Subject"] = f"INTEX | {len(new_rows)} oportunidades públicas de textiles/uniformes"
+        msg["From"] = smtp_user
+        msg["To"] = recipient
+        lines = ["Oportunidades detectadas por INTEX Alertas Públicas V2", ""]
+        for row in new_rows[:40]:
+            lines += [
+                f"[{row['Prioridad']}] {row['Título']}",
+                f"Institución: {row['Institución']}",
+                f"Puntaje: {row['Puntaje']}/100",
+                f"Fecha límite: {row['Fecha límite'] or 'No publicada'}",
+                f"Días restantes: {row['Días restantes'] if pd.notna(row['Días restantes']) else 'No disponible'}",
+                f"¿Por qué INTEX?: {row['¿Por qué INTEX?']}",
+                f"Enlace: {row['Enlace'] or 'No disponible'}",
+                ""
+            ]
+        msg.set_content("\n".join(lines))
+        try:
+            with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
+                server.starttls()
+                server.login(smtp_user, smtp_password)
+                server.send_message(msg)
+            for row in new_rows:
+                conn.execute("INSERT OR IGNORE INTO sent_alerts (id, sent_at) VALUES (?, ?)",
+                             (str(row["_id"]), datetime.utcnow().isoformat()))
+            conn.commit()
+            return len(new_rows), "Correo enviado correctamente."
+        except Exception as e:
+            return 0, f"No se pudo enviar el correo: {e}"
 
-def send_email(df, recipient):
-    if df.empty:
-        return False, "No hay oportunidades para enviar."
-
-    sender = os.getenv("SMTP_USER", recipient)
-    password = os.getenv("SMTP_PASSWORD", "")
-    host = os.getenv("SMTP_HOST", "smtp.gmail.com")
-    port = int(os.getenv("SMTP_PORT", "587"))
-
-    if not password:
-        return False, "Falta SMTP_PASSWORD. Para Gmail use una contraseña de aplicación."
-
-    subject = f"INTEX | {len(df)} nuevas oportunidades públicas de textiles/uniformes"
-    html = f"""
-    <html><body>
-    <h2>INTEX – Alertas Públicas de Honduras</h2>
-    <p>Se detectaron <b>{len(df)}</b> oportunidades con posible relación con confección, textiles y uniformes.</p>
-    <table border="1" cellpadding="6" cellspacing="0">
-      <tr><th>Relevancia</th><th>Entidad</th><th>Oportunidad</th><th>Límite</th><th>Monto</th><th>Ver</th></tr>
-    """
-    for _, r in df.iterrows():
-        html += f"""
-        <tr>
-          <td><b>{r['relevancia']}</b> ({r['puntaje']})</td>
-          <td>{r['entidad']}</td>
-          <td>{r['titulo']}</td>
-          <td>{r['fecha_limite'] or 'No indicado'}</td>
-          <td>{money(r['monto'])}</td>
-          <td><a href="{r['url']}">Abrir proceso</a></td>
-        </tr>
-        """
-    html += "</table><p>Fuente: ONCAE / HonduCompras / Portal de Contrataciones Abiertas de Honduras.</p></body></html>"
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = sender
-    msg["To"] = recipient
-    msg.attach(MIMEText(html, "html", "utf-8"))
-
-    with smtplib.SMTP(host, port, timeout=30) as server:
-        server.starttls()
-        server.login(sender, password)
-        server.sendmail(sender, [recipient], msg.as_string())
-    return True, "Correo enviado correctamente."
-
-def send_new_alerts(df, recipient):
-    conn = init_db()
-    sent = get_sent(conn)
-    new_df = df[~df["ocid"].isin(sent)].copy()
-    new_df = new_df[new_df["relevancia"].isin(["ALTA", "MEDIA"])].head(25)
-    if new_df.empty:
-        return 0, "No hay alertas nuevas."
-    ok, message = send_email(new_df, recipient)
-    if ok:
-        mark_sent(conn, new_df["ocid"].tolist())
-        return len(new_df), message
-    return 0, message
-
-st.set_page_config(page_title=APP_NAME, page_icon="🧵", layout="wide")
-st.title("🧵 INTEX Alertas Públicas")
-st.caption("Monitor de oportunidades de contratación pública de Honduras para confección, textiles, uniformes y productos relacionados.")
+st.set_page_config(page_title=APP_TITLE, page_icon="🧵", layout="wide")
+st.title("🧵 INTEX Alertas Públicas V2")
+st.caption("Monitor de oportunidades de contratación pública en Honduras relacionadas con textiles, confección y uniformes.")
 
 with st.sidebar:
-    st.header("Configuración")
-    email = st.text_input("Correo de alertas", value=DEFAULT_EMAIL)
-    data_url = st.text_input("Fuente de datos 2026", value=DEFAULT_DATA_URL)
-    min_score = st.slider("Puntaje mínimo", 1, 30, 12)
-    if st.button("🔄 Actualizar datos", use_container_width=True):
-        load_records.clear()
-        st.rerun()
-    st.info("La fuente utilizada corresponde a datos abiertos de contratación pública. Revise siempre el pliego oficial antes de ofertar.")
+    st.header("Fuente de datos")
+    data_url = st.text_input("URL de datos JSON/JSONL/GZIP", value=os.getenv("INTEX_DATA_URL", DEFAULT_DATA_URL))
+    uploaded = st.file_uploader("O cargar archivo de contrataciones", type=["json", "jsonl", "gz", "txt"])
+    st.divider()
+    st.header("Filtros")
+    min_score = st.slider("Puntaje mínimo", min_value=0, max_value=100, value=12, step=1)
+    urgent_only = st.checkbox("Solo oportunidades con 15 días o menos", value=False)
+    priorities = st.multiselect("Prioridad", ["MUY ALTA", "ALTA", "MEDIA", "BAJA"],
+                                default=["MUY ALTA", "ALTA", "MEDIA", "BAJA"])
+    st.divider()
+    st.header("Alertas por correo")
+    recipient = st.text_input("Correo destinatario", value="intexventas@gmail.com")
+    smtp_user = st.text_input("Cuenta Gmail emisora", value=os.getenv("SMTP_USER", ""))
+    smtp_password = st.text_input("Contraseña de aplicación de Google", type="password", value=os.getenv("SMTP_PASSWORD", ""))
+    send_button = st.button("Enviar oportunidades nuevas por correo", use_container_width=True)
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_data(url):
+    records = load_records(url)
+    return prepare_dataframe(records)
 
 try:
-    df = load_records(data_url)
+    with st.spinner("Consultando oportunidades de contratación..."):
+        if uploaded is not None:
+            df_all = prepare_dataframe(load_records(data_url, uploaded))
+        else:
+            df_all = get_data(data_url)
+    st.success(f"Consulta completada. Oportunidades relacionadas detectadas: {len(df_all)}")
 except Exception as e:
-    st.error(f"No fue posible cargar los datos: {e}")
-    st.stop()
+    df_all = pd.DataFrame()
+    st.error("No se pudo consultar la fuente automáticamente.")
+    st.caption(f"Detalle técnico: {e}")
+    st.info("Puede cargar un archivo JSON/JSONL descargado de la fuente oficial para continuar.")
 
-if df.empty:
-    st.warning("No se encontraron registros relevantes en la fuente.")
-    st.stop()
+if not df_all.empty:
+    total = len(df_all)
+    very_high = int((df_all["Prioridad"] == "MUY ALTA").sum())
+    high = int((df_all["Prioridad"] == "ALTA").sum())
+    urgent = int(df_all["Días restantes"].apply(lambda x: pd.notna(x) and 0 <= x <= 15).sum())
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Oportunidades detectadas", total)
+    c2.metric("Muy alta prioridad", very_high)
+    c3.metric("Alta prioridad", high)
+    c4.metric("Vencen en ≤15 días", urgent)
 
-# Filtros
-c1, c2, c3 = st.columns(3)
-with c1:
-    search = st.text_input("🔎 Buscar", placeholder="Ej.: camisas, uniformes, tela...")
-with c2:
-    level = st.multiselect("Relevancia", ["ALTA", "MEDIA", "BAJA"], default=["ALTA", "MEDIA"])
-with c3:
-    entity = st.text_input("Entidad", placeholder="Ej.: Secretaría de Educación")
+    query = st.text_input("Buscar por título, institución o coincidencia", placeholder="Ej. camisas, uniformes, hospital...")
+    entities = sorted(df_all["Institución"].dropna().astype(str).unique().tolist())
+    selected_entities = st.multiselect("Filtrar por institución", entities)
+    df = df_all[df_all["Puntaje"] >= min_score].copy()
+    df = df[df["Prioridad"].isin(priorities)]
+    if selected_entities:
+        df = df[df["Institución"].isin(selected_entities)]
+    if urgent_only:
+        df = df[df["Días restantes"].apply(lambda x: pd.notna(x) and 0 <= x <= 15)]
+    if query.strip():
+        q = normalize(query)
+        df = df[df["_texto"].str.contains(re.escape(q), na=False)]
 
-view = df[df["puntaje"] >= min_score].copy()
-if level:
-    view = view[view["relevancia"].isin(level)]
-if search:
-    q = normalize(search)
-    view = view[view.apply(lambda r: q in normalize(" ".join(map(str, r.values))), axis=1)]
-if entity:
-    view = view[view["entidad"].str.contains(entity, case=False, na=False)]
-
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Oportunidades", len(view))
-m2.metric("Alta relevancia", int((view["relevancia"] == "ALTA").sum()))
-m3.metric("Media relevancia", int((view["relevancia"] == "MEDIA").sum()))
-m4.metric("Entidades", view["entidad"].nunique())
+    st.subheader(f"Resultados: {len(df)} oportunidades")
+    display_cols = ["Prioridad", "Puntaje", "Título", "Institución", "Fecha límite", "Días restantes", "Estado", "¿Por qué INTEX?", "Enlace"]
+    show = df[display_cols].copy()
+    show["Enlace"] = show["Enlace"].apply(lambda x: x if isinstance(x, str) and x.startswith(("http://", "https://")) else "")
+    st.dataframe(show, use_container_width=True, hide_index=True,
+                 column_config={"Enlace": st.column_config.LinkColumn("Enlace", display_text="Abrir oportunidad"),
+                                "Puntaje": st.column_config.ProgressColumn("Puntaje", min_value=0, max_value=100, format="%d/100"),
+                                "Fecha límite": st.column_config.DateColumn("Fecha límite", format="DD/MM/YYYY"),
+                                "Publicado": st.column_config.DateColumn("Publicado", format="DD/MM/YYYY") if "Publicado" in show.columns else None})
+    csv = df[display_cols].to_csv(index=False).encode("utf-8-sig")
+    st.download_button("Descargar resultados en Excel/CSV", data=csv, file_name="INTEX_oportunidades_V2.csv", mime="text/csv")
+    if send_button:
+        count, message = send_email(df, recipient, smtp_user, smtp_password)
+        if count:
+            st.success(f"{message} Oportunidades enviadas: {count}.")
+        else:
+            st.warning(message)
+else:
+    st.warning("No hay resultados disponibles para mostrar. Revise la fuente de datos o cargue un archivo de contrataciones.")
 
 st.divider()
-st.subheader("Oportunidades detectadas")
-display = view[[
-    "relevancia", "puntaje", "entidad", "titulo",
-    "modalidad", "fecha_limite", "monto", "coincidencias", "url"
-]].copy()
-display.columns = [
-    "Relevancia", "Puntaje", "Entidad", "Oportunidad",
-    "Modalidad", "Fecha límite", "Monto", "Palabras detectadas", "Enlace"
-]
-st.dataframe(display, use_container_width=True, hide_index=True, column_config={
-    "Enlace": st.column_config.LinkColumn("Proceso oficial")
-})
-
-st.divider()
-st.subheader("📧 Alertas por correo")
-st.write(f"Las alertas se enviarán a **{email}** cuando se configure SMTP.")
-if st.button("📨 Enviar ahora las oportunidades nuevas", type="primary"):
-    count, msg = send_new_alerts(view, email)
-    if count:
-        st.success(f"{msg} Se enviaron {count} oportunidades.")
-    else:
-        st.warning(msg)
-
-with st.expander("Palabras que busca el sistema"):
-    st.write(", ".join(KEYWORDS.keys()))
+st.caption("Aviso: esta herramienta sirve como filtro de apoyo. Verifique siempre los pliegos, requisitos, fechas y enlaces en la fuente oficial antes de preparar una oferta.")

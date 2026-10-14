@@ -1,24 +1,23 @@
-"""
-Ejecuta este archivo una vez al día para enviar las alertas nuevas.
-Variables necesarias:
-  SMTP_USER=intexventas@gmail.com
-  SMTP_PASSWORD=contraseña_de_aplicación_de_Gmail
-  ALERT_EMAIL=intexventas@gmail.com
-
-Opcional:
-  DATA_URL=URL del archivo JSONL.GZ de ONCAE/OCP
+"""Envío programado opcional de oportunidades nuevas.
+Ejecute este archivo desde un programador externo (por ejemplo, GitHub Actions).
+Configure los secretos SMTP_USER, SMTP_PASSWORD y ALERT_RECIPIENT.
 """
 import os
+import sys
 import pandas as pd
-from app import load_records, send_new_alerts
+from app import DEFAULT_DATA_URL, load_records, prepare_dataframe, send_email
 
-recipient = os.getenv("ALERT_EMAIL", "intexventas@gmail.com")
-data_url = os.getenv(
-    "DATA_URL",
-    "https://fastly.data.open-contracting.org/downloads/honduras_oncae/4176/2026.jsonl.gz"
-)
+url = os.getenv("INTEX_DATA_URL", DEFAULT_DATA_URL)
+recipient = os.getenv("ALERT_RECIPIENT", "intexventas@gmail.com")
+smtp_user = os.getenv("SMTP_USER", "")
+smtp_password = os.getenv("SMTP_PASSWORD", "")
 
-df = load_records(data_url)
-count, msg = send_new_alerts(df, recipient)
-print(msg)
-print(f"Alertas enviadas: {count}")
+try:
+    df = prepare_dataframe(load_records(url))
+    count, message = send_email(df, recipient, smtp_user, smtp_password)
+    print(message)
+    print(f"Oportunidades nuevas enviadas: {count}")
+    sys.exit(0 if "No se pudo" not in message else 1)
+except Exception as exc:
+    print(f"Error en el trabajo programado: {exc}")
+    sys.exit(1)
