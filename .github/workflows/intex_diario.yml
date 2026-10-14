@@ -1,0 +1,13 @@
+name: INTEX Alertas Diarias
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 14 * * *"
+
+jobs:
+  prueba:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirmar ejecucion
+        run: echo "INTEX V2 - prueba de ejecucion diaria"
