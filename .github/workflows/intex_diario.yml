@@ -3,11 +3,27 @@ name: INTEX Alertas Diarias
 on:
   workflow_dispatch:
   schedule:
-    - cron: "30 14 * * *"
+    - cron: "30 20 * * *"
 
 jobs:
-  prueba:
+  enviar-alertas:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Confirmar ejecucion
-        run: echo "INTEX V2 - prueba de ejecucion diaria"
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Ejecutar alertas
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          INTEX_DATA_URL: ${{ secrets.INTEX_DATA_URL }}
+        run: python alert_job.py
