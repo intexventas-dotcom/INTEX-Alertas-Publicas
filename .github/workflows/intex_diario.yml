@@ -22,8 +22,9 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Ejecutar alertas
-        env:
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          INTEX_DATA_URL: ${{ secrets.INTEX_DATA_URL }}
-        run: python alert_job.py
+       env:
+          USUARIO_SMTP: ${{ secrets.SMTP_USER }}
+          CONTRASEÑA_SMTP: ${{ secrets.SMTP_PASSWORD }}
+          ALERT_RECIPIENT: ${{ secrets.INTEX_RECIPIENT }}
+          URL_DE_DATOS_INTEX: ${{ secrets.INTEX_DATA_URL }}
+
