@@ -14,7 +14,7 @@ import requests
 import streamlit as st
 
 APP_TITLE = "INTEX Alertas Públicas V2"
-DEFAULT_DATA_URL = "https://fastly.data.open-contracting.org/downloads/honduras_oncae/4176/2026.jsonl.gz"
+DEFAULT_DATA_URL = "https://fastly.data.open-contracting.org/downloads/honduras_oncae/4368/2026.jsonl.gz"
 DB_PATH = os.getenv("INTEX_DB_PATH", "intex_alerts.sqlite3")
 
 DIRECT = {
