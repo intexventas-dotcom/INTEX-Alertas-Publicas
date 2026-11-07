@@ -288,8 +288,7 @@ def send_email(df, recipient, smtp_user, smtp_password):
             ]
         msg.set_content("\n".join(lines))
         try:
-            with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
-                server.starttls()
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
                 server.login(smtp_user, smtp_password)
                 server.send_message(msg)
             for row in new_rows:
