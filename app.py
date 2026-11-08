@@ -5,7 +5,7 @@ import re
 import sqlite3
 import smtplib
 import hashlib
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from email.message import EmailMessage
 from io import BytesIO
 
@@ -246,6 +246,13 @@ def prepare_dataframe(records):
         })
     df = pd.DataFrame(rows)
     if not df.empty:
+        # Regla permanente: conservar solo oportunidades publicadas en los últimos 15 días.
+        today = date.today()
+        publication_cutoff = today - timedelta(days=15)
+        df = df[df["Publicado"].apply(
+            lambda published: pd.notna(published) and publication_cutoff <= published <= today
+        )].copy()
+    if not df.empty:
         order = {"MUY ALTA": 0, "ALTA": 1, "MEDIA": 2, "BAJA": 3}
         df["_orden"] = df["Prioridad"].map(order)
         df = df.sort_values(["_orden", "Puntaje", "Días restantes"], ascending=[True, False, True], na_position="last").drop(columns=["_orden"])
@@ -310,7 +317,7 @@ with st.sidebar:
     st.divider()
     st.header("Filtros")
     min_score = st.slider("Puntaje mínimo", min_value=0, max_value=100, value=12, step=1)
-    urgent_only = st.checkbox("Solo oportunidades con 15 días o menos", value=False)
+    urgent_only = st.checkbox("Solo oportunidades cuyo cierre sea en 15 días o menos", value=False)
     priorities = st.multiselect("Prioridad", ["MUY ALTA", "ALTA", "MEDIA", "BAJA"],
                                 default=["MUY ALTA", "ALTA", "MEDIA", "BAJA"])
     st.divider()
