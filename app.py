@@ -15,6 +15,8 @@ import streamlit as st
 
 APP_TITLE = "INTEX Alertas Públicas V2"
 DEFAULT_DATA_URL = "https://fastly.data.open-contracting.org/downloads/honduras_oncae/4368/2026.jsonl.gz"
+# Portal público de consulta de procesos históricos de HonduCompras (SICC).
+HONDUCOMPRAS_PORTAL_URL = "https://sicc.honducompras.gob.hn/HC/procesos/busquedahistorico.aspx"
 DB_PATH = os.getenv("INTEX_DB_PATH", "intex_alerts.sqlite3")
 
 DIRECT = {
@@ -157,6 +159,9 @@ def flatten_record(r):
             break
     if not url:
         url = first(tender, ["url"])
+    # Si el registro no trae documentos/enlace propio, dirigir al buscador oficial SICC.
+    if not url:
+        url = HONDUCOMPRAS_PORTAL_URL
     return {
         "id": str(first(r, ["ocid", "id"], "")),
         "titulo": str(title),
@@ -281,7 +286,7 @@ def send_email(df, recipient, smtp_user, smtp_password):
         msg["Subject"] = f"INTEX | {len(new_rows)} oportunidades públicas de textiles/uniformes"
         msg["From"] = smtp_user
         msg["To"] = recipient
-        lines = ["Oportunidades detectadas por INTEX Alertas Públicas V2", ""]
+        lines = ["Oportunidades detectadas por INTEX Alertas Públicas V2", "Fuente automatizada: datos abiertos OCDS de ONCAE / HonduCompras 1.0.", f"Consulta complementaria SICC: {HONDUCOMPRAS_PORTAL_URL}", ""]
         for row in new_rows[:40]:
             lines += [
                 f"[{row['Prioridad']}] {row['Título']}",
@@ -309,6 +314,8 @@ def send_email(df, recipient, smtp_user, smtp_password):
 st.set_page_config(page_title=APP_TITLE, page_icon="🧵", layout="wide")
 st.title("🧵 INTEX Alertas Públicas V2")
 st.caption("Monitor de oportunidades de contratación pública en Honduras relacionadas con textiles, confección y uniformes.")
+st.markdown(f"**Consulta complementaria en HonduCompras (SICC):** [{HONDUCOMPRAS_PORTAL_URL}]({HONDUCOMPRAS_PORTAL_URL})")
+st.caption("Fuente automatizada: datos abiertos OCDS de ONCAE / HonduCompras 1.0. El enlace SICC permite contrastar procesos en el portal oficial; no se presenta como una descarga automática independiente.")
 
 with st.sidebar:
     st.header("Fuente de datos")
