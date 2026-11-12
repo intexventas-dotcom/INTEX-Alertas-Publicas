@@ -21,6 +21,9 @@ jobs:
       - name: Instalar dependencias
         run: pip install -r requirements.txt
 
+      - name: Diagnosticar acceso al portal HonduCompras SICC
+        run: python probe_honducompras.py
+
       - name: Ejecutar alertas
         env:
           SMTP_USER: ${{ secrets.SMTP_USER }}
