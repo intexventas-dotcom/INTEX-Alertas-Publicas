@@ -29,6 +29,63 @@ class LinkFinder(HTMLParser):
                 self.links.append((href, attrs.get("title", "")))
 
 
+class FormInspector(HTMLParser):
+    """Resume formularios ASP.NET sin imprimir valores de sesión o tokens."""
+    def __init__(self):
+        super().__init__()
+        self.forms = []
+        self.current_form = None
+        self.scripts = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        tag = tag.lower()
+        if tag == "form":
+            self.current_form = {
+                "action": attrs.get("action", ""),
+                "method": attrs.get("method", "get").upper(),
+                "fields": [],
+            }
+            self.forms.append(self.current_form)
+        elif tag == "input" and self.current_form is not None:
+            name = attrs.get("name") or attrs.get("id") or ""
+            if name:
+                value = attrs.get("value", "")
+                field_type = attrs.get("type", "text").lower()
+                detail = f"{name} (type={field_type}"
+                if field_type == "hidden":
+                    detail += f", value_length={len(value)}"
+                elif value:
+                    detail += f", value={value[:80]!r}"
+                detail += ")"
+                self.current_form["fields"].append(detail)
+        elif tag == "select" and self.current_form is not None:
+            name = attrs.get("name") or attrs.get("id") or ""
+            if name:
+                self.current_form["fields"].append(f"{name} (select)")
+        elif tag == "textarea" and self.current_form is not None:
+            name = attrs.get("name") or attrs.get("id") or ""
+            if name:
+                self.current_form["fields"].append(f"{name} (textarea)")
+        elif tag == "script" and attrs.get("src"):
+            self.scripts.append(attrs["src"])
+
+    def handle_endtag(self, tag):
+        if tag.lower() == "form":
+            self.current_form = None
+
+    def __init__(self):
+        super().__init__()
+        self.links = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() == "a":
+            attrs = dict(attrs)
+            href = attrs.get("href", "").strip()
+            if href:
+                self.links.append((href, attrs.get("title", "")))
+
+
 def probe(label, url, inspect_html=False):
     print(f"\nSOURCE={label}")
     print(f"REQUEST_URL={url}")
@@ -58,6 +115,20 @@ def probe(label, url, inspect_html=False):
             print(f"RELEVANT_LINK_COUNT={len(matches)}")
             for link in matches[:12]:
                 print("RELEVANT_LINK=" + link[:500])
+
+            inspector = FormInspector()
+            inspector.feed(text)
+            print(f"FORM_COUNT={len(inspector.forms)}")
+            for index, form in enumerate(inspector.forms[:8], start=1):
+                action = urljoin(response.url, form["action"] or response.url)
+                print(f"FORM_{index}_METHOD={form['method']}")
+                print(f"FORM_{index}_ACTION={action[:500]}")
+                print(f"FORM_{index}_FIELD_COUNT={len(form['fields'])}")
+                for field in form["fields"][:40]:
+                    print(f"FORM_{index}_FIELD={field[:240]}")
+            print(f"SCRIPT_SOURCE_COUNT={len(inspector.scripts)}")
+            for src in inspector.scripts[:20]:
+                print("SCRIPT_SOURCE=" + urljoin(response.url, src)[:500])
         else:
             chunk = next(response.iter_content(chunk_size=32), b"")
             if label == "OCDS":
