@@ -40,3 +40,14 @@ Streamlit Community Cloud no garantiza ejecutar un script todos los días por s�
 
 ## Importante
 La fuente de datos por defecto es un archivo público de contrataciones en formato JSONL/GZIP. Si la dirección deja de funcionar o el año cambia, actualice la URL desde la barra lateral. Siempre confirme la licitación y sus documentos en el portal oficial antes de presentar una oferta.
+
+
+## Fuente complementaria: HonduCompras (SICC)
+
+La aplicación conserva la descarga automatizada del conjunto de datos abiertos OCDS de ONCAE correspondiente a HonduCompras 1.0. Además, muestra en el panel y en los correos el buscador público de procesos históricos del SICC para contrastar oportunidades:
+
+- Buscador oficial SICC: https://sicc.honducompras.gob.hn/HC/procesos/busquedahistorico.aspx
+- Portal oficial HonduCompras: https://honducompras.gob.hn/
+- Datos abiertos ONCAE: https://oncae.gob.hn/datos-abiertos/
+
+**Importante:** el buscador SICC se incorpora como enlace oficial de verificación, no como una segunda descarga automatizada. La consulta directa automatizada del SICC requiere validar su estructura y mecanismo público de consulta antes de habilitar un extractor. Se mantienen el filtro de publicaciones de los últimos 15 días y el control de duplicados.
